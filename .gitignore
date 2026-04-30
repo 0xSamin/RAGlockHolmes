@@ -1,1 +1,16 @@
-/.venv/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Vector Database
+chroma_db/
+
+# Uploaded documents
+data/
+*.pdf
+*.docx
+
+# OS
+.DS_Store

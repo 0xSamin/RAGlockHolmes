@@ -1,0 +1,1 @@
+“Supports text-based PDFs and DOCX. Scanned PDFs require OCR preprocessing (not included).”

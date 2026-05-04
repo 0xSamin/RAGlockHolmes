@@ -34,6 +34,8 @@ cd raglock-holmes
 **2. Install Python dependencies**
 bash
 pip install -r requirements.txt
+OR 
+pip install -r requirements.txt -i https://mirror-pypi.runflare.com/simple/ --trusted-host mirror-pypi.runflare.com
 
 **3. Setup Local LLM (Ollama)**
 Download and install [Ollama](https://ollama.com/), then pull the Llama 3.2 model:

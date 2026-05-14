@@ -1,4 +1,5 @@
 import os
+
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
@@ -9,12 +10,15 @@ from core.raglock_system import RaglockSystem
 
 st.set_page_config(page_title="RAGlock Holmes", page_icon="🕵️‍♂️", layout="wide")
 
+
 @st.cache_resource
 def load_rag_system():
     return RaglockSystem()
 
+
 def file_hash(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
+
 
 # --- Initialize session state safely ---
 if "rag_system" not in st.session_state:
@@ -40,11 +44,14 @@ with st.sidebar:
         if st.session_state.get("last_file_hash") != h:
             with st.spinner("Processing document... (Extracting, chunking, Embedding)"):
                 file_extension = os.path.splitext(uploaded_file.name)[1].lower()
-                with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                with tempfile.NamedTemporaryFile(delete=False,
+                                                 suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
                     tmp_file.write(data)
                     tmp_path = tmp_file.name
 
-                st.session_state.rag_system.ingest_document(tmp_path)
+                st.session_state.rag_system.ingest_document(
+                    file_path=tmp_path,
+                    original_filename=uploaded_file.name)
 
                 st.session_state.doc_processed = True
                 st.session_state.last_file_hash = h
@@ -72,12 +79,18 @@ if prompt := st.chat_input("Ask a question about the uploaded document..."):
             st.warning(response_text)
         else:
             with st.spinner("Searching for answers..."):
-                answer_text, source_docs = st.session_state.rag_system.ask_question(prompt)
+                # answer_text already contains formatted sources from raglock_system.py
+                answer_text, source_docs, verification = st.session_state.rag_system.ask_question(prompt)
 
-                sources = {f"Page {doc.metadata.get('page', 'Unknown')}" for doc in source_docs}
-                source_str = ", ".join(sources) if sources else "Unknown Source"
+                verification = st.session_state.rag_system.verifier.get_verification_summary(answer_text, source_docs)
 
-                response_text = f"{answer_text}\n\n**Sources:** *{source_str}*"
+                if not verification["is_valid"]:
+                    st.warning(f"⚠️ {verification['reason']}")
+                else:
+                    st.success("✅ Response verified")
+
+                # Just use the answer_text as-is (it already has sources formatted)
+                response_text = answer_text
                 st.markdown(response_text)
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})

@@ -1,11 +1,12 @@
 import os
 import sys
 import re
+import torch
 from loaders.pdf_loader import PdfLoader, DocxLoader
 from chunking.text_chunker import TextChunker
 from vectorstore.vectordb_manager import VectorDBManager
 from utils.verifier import ResponseVerifier
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+from unsloth import FastLanguageModel  # Directly loading the local GPU acceleration kernels
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 from utils.prompts import SYSTEM_PROMPT, QUERY_PROMPT_TEMPLATE
@@ -16,38 +17,26 @@ class RaglockSystem:
     def __init__(
         self,
         model_name: str = "BAAI/bge-base-en-v1.5",
-        device: str = "cpu",
-        llm_model: str = "google/gemma-2-9b-it",
-        hf_token: str = None  # Receives token directly from the Streamlit UI layer
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        llm_model: str = "unsloth/gemma-2-9b-it-4bit", # Uses official 4-bit optimized memory layout
+        hf_token: str = None  # No longer strictly needed for inference, kept to avoid app.py errors
     ):
-        print("Initializing RAGlock Holmes Engine...")
+        print(f"Initializing RAGlock Holmes Local Engine on GPU ({device})...")
         self.chunker = TextChunker()
         self.vector_db = VectorDBManager(model_name=model_name, device=device)
         self.verifier = ResponseVerifier()
         
-        # Fallback to environment variable if not explicitly passed
-        if not hf_token:
-            hf_token = os.environ.get('HF_TOKEN')
-                
-        if not hf_token:
-            raise ValueError(
-                "❌ HF_TOKEN is missing. Please provide it during initialization."
-            )
-            
-        # 1. Setup the serverless inference endpoint matrix
-        llm_endpoint = HuggingFaceEndpoint(
-            repo_id=llm_model,
-            task="text-generation",
-            max_new_tokens=1024,
-            temperature=0.1,
-            huggingfacehub_api_token=hf_token,
+        # Load the accelerated model and native fast tokenizer via Unsloth patches
+        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+            model_name=llm_model,
+            max_seq_length=2048,
+            load_in_4bit=True, # Drastically lowers VRAM footprint to comfortably fit on Tesla T4
+            device_map="auto"
         )
-        
-        # 2. Wrap it in a Chat-compatible interface for LangChain chat structures
-        self.llm = ChatHuggingFace(llm=llm_endpoint)
+        # FastLanguageModel.for_inference(self.model) # Optimize the model layers specifically for generation tasks
         
         self.qa_prompt = PromptTemplate.from_template(QUERY_PROMPT_TEMPLATE)
-        print("Initialization complete.")
+        print("Local GPU Engine Initialization complete.")
 
     # ------------------------------------------------------------------
     # Ingestion Layer
@@ -79,11 +68,6 @@ class RaglockSystem:
     def ask_question(self, question: str) -> Tuple[str, List[Document], dict]:
         """
         Answer a question using the hybrid RAG pipeline matrix.
-
-        Returns:
-            final_answer: formatted answer string with sources appended
-            docs: retrieved source documents
-            verification: verification summary dict from ResponseVerifier
         """
         docs = self._retrieve(question)
         context = self._build_context(docs)
@@ -119,17 +103,35 @@ class RaglockSystem:
         return "\n\n".join(parts)
 
     def _generate_answer(self, question: str, context: str) -> str:
-        """Send prompt to LLM and return the cleaned answer."""
+        """Generate answer locally using the fast Unsloth tokenization stream."""
         prompt = self.qa_prompt.format(context=context, question=question)
         
-        # Standardized chat format for Gemma 2
-        response = self.llm.invoke([
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ])
+        # Format explicitly into Gemma 2 Chat Templates structures
+        messages = [
+            {"role": "user", "content": f"{SYSTEM_PROMPT}\n\n{prompt}"}
+        ]
         
-        # Strip any self-generated "Sources:" section the model may append
-        answer = re.split(r'\n\s*Sources?:', response.content, flags=re.IGNORECASE)[0]
+        inputs = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to("cuda")
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=inputs,
+                max_new_tokens=1024,
+                temperature=0.1,
+                use_cache=True
+            )
+        
+        # Decode the raw generated tokens while skipping system prompt components
+        generated_tokens = outputs[0][len(inputs[0]):]
+        response_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        
+        # Strip any self-generated "Sources:" sections
+        answer = re.split(r'\n\s*Sources?:', response_text, flags=re.IGNORECASE)[0]
         return answer.strip()
 
     def _verify(self, answer: str, docs: List[Document]) -> dict:

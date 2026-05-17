@@ -68,10 +68,12 @@ class VectorDBManager:
     def __init__(self, persist_directory="./chroma_db", model_name="BAAI/bge-base-en-v1.5", device="cpu"):
         self.persist_directory = persist_directory
 
+        # CHANGED: Fixed the cache path for Linux and removed local-only restriction
         self.embeddings = HuggingFaceEmbeddings(
             model_name=model_name,
-            model_kwargs={"device": device},
-            encode_kwargs={"normalize_embeddings": True}
+            model_kwargs={'local_files_only': False},  # Let Colab download it fresh on day 1
+            encode_kwargs={"normalize_embeddings": True},
+            cache_folder="/content/.cache/huggingface/hub"  # Clean Linux-friendly path inside Colab
         )
 
         self.vector_store = None

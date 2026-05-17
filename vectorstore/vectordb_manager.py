@@ -25,8 +25,9 @@ class HybridRetriever(BaseRetriever):
         run_manager: CallbackManagerForRetrieverRun = None
     ) -> List[Document]:
         """Retrieve and merge documents from both retrievers."""
-        bm25_docs = self.bm25_retriever.get_relevant_documents(query)
-        vector_docs = self.vector_retriever.get_relevant_documents(query)
+        # FIX: Ensure both inner retrievers consistently utilize modern LangChain execution patterns (.invoke)
+        bm25_docs = self.bm25_retriever.invoke(query)
+        vector_docs = self.vector_retriever.invoke(query)
 
         doc_scores = {}
 
@@ -68,12 +69,12 @@ class VectorDBManager:
     def __init__(self, persist_directory="./chroma_db", model_name="BAAI/bge-base-en-v1.5", device="cpu"):
         self.persist_directory = persist_directory
 
-        # CHANGED: Fixed the cache path for Linux and removed local-only restriction
+        # Fixed the cache path for Linux and removed local-only restriction
         self.embeddings = HuggingFaceEmbeddings(
             model_name=model_name,
-            model_kwargs={'local_files_only': False},  # Let Colab download it fresh on day 1
+            model_kwargs={'local_files_only': False},
             encode_kwargs={"normalize_embeddings": True},
-            cache_folder="/content/.cache/huggingface/hub"  # Clean Linux-friendly path inside Colab
+            cache_folder="/content/.cache/huggingface/hub"
         )
 
         self.vector_store = None

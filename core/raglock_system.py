@@ -1,10 +1,10 @@
 import os
+import sys
 import re
 from loaders.pdf_loader import PdfLoader, DocxLoader
 from chunking.text_chunker import TextChunker
 from vectorstore.vectordb_manager import VectorDBManager
 from utils.verifier import ResponseVerifier
-from google.colab import userdata
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
@@ -17,25 +17,24 @@ class RaglockSystem:
         self,
         model_name: str = "BAAI/bge-base-en-v1.5",
         device: str = "cpu",
-        llm_model: str = "google/gemma-2-9b-it"
+        llm_model: str = "google/gemma-2-9b-it",
+        hf_token: str = None  # Receives token directly from the Streamlit UI layer
     ):
-        print("Initializing RAGlock Holmes...")
+        print("Initializing RAGlock Holmes Engine...")
         self.chunker = TextChunker()
         self.vector_db = VectorDBManager(model_name=model_name, device=device)
         self.verifier = ResponseVerifier()
         
-        # FIX: Check OS environment variables first (for Streamlit), then fall back to Colab Secrets
-        hf_token = os.environ.get('HF_TOKEN')
+        # Fallback to environment variable if not explicitly passed
         if not hf_token:
-            try:
-                hf_token = userdata.get('HF_TOKEN')
-            except Exception:
-                hf_token = None
+            hf_token = os.environ.get('HF_TOKEN')
                 
         if not hf_token:
-            raise ValueError("❌ Please set your 'HF_TOKEN' in the Colab Secrets (key icon) sidebar or environment variables.")
+            raise ValueError(
+                "❌ HF_TOKEN is missing. Please provide it during initialization."
+            )
             
-        # 1. Setup the serverless endpoint
+        # 1. Setup the serverless inference endpoint matrix
         llm_endpoint = HuggingFaceEndpoint(
             repo_id=llm_model,
             task="text-generation",
@@ -44,14 +43,14 @@ class RaglockSystem:
             huggingfacehub_api_token=hf_token,
         )
         
-        # 2. Wrap it in a Chat-compatible interface for LangChain chat messages
+        # 2. Wrap it in a Chat-compatible interface for LangChain chat structures
         self.llm = ChatHuggingFace(llm=llm_endpoint)
         
         self.qa_prompt = PromptTemplate.from_template(QUERY_PROMPT_TEMPLATE)
         print("Initialization complete.")
 
     # ------------------------------------------------------------------
-    # Ingestion
+    # Ingestion Layer
     # ------------------------------------------------------------------
 
     def ingest_document(self, file_path: str, original_filename: str = None):
@@ -74,12 +73,12 @@ class RaglockSystem:
         print(f"✅ Ingested {len(chunks)} chunks from '{source_name}'")
 
     # ------------------------------------------------------------------
-    # Q&A
+    # Q&A Processing Layout
     # ------------------------------------------------------------------
 
     def ask_question(self, question: str) -> Tuple[str, List[Document], dict]:
         """
-        Answer a question using the RAG pipeline.
+        Answer a question using the hybrid RAG pipeline matrix.
 
         Returns:
             final_answer: formatted answer string with sources appended
@@ -96,7 +95,7 @@ class RaglockSystem:
         return final_answer, docs, verification
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Private Core Helpers
     # ------------------------------------------------------------------
 
     def _retrieve(self, question: str) -> List[Document]:

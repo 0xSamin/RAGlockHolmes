@@ -3,7 +3,7 @@ from langchain_core.documents import Document
 
 
 class TextChunker:
-    def __init__(self, chunk_size=400, chunk_overlap=50):
+    def __init__(self, chunk_size=1200, chunk_overlap=200):
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -11,22 +11,38 @@ class TextChunker:
             is_separator_regex=False,
         )
 
-    def chunk_documents(self, content):
-        # 1. Convert your list of dicts to LangChain Document objects
-        langchain_docs = []
+    def chunk_documents(self, content, source_file=None):
+
+        chunks = []
+        chunk_id = 0
+
         for page in content:
+
+            # Create base document
             doc = Document(
                 page_content=page["text"],
-                metadata={"page_number": page["page_number"]}
+                metadata={
+                    "page": page["page_number"],
+                    "is_synthetic": page.get("is_synthetic", False),
+                    "author": page.get("metadata", {}).get("author"),
+                    "title": page.get("metadata", {}).get("title"),
+                    "source": source_file or "Unknown"
+                }
             )
-            langchain_docs.append(doc)
 
-        # 2. LangChain automatically preserves metadata for each chunk!
-        # If a chunk comes from page 5, it will have {"page_number": 5}
-        chunks = self.text_splitter.split_documents(langchain_docs)
+            # ---- Preserve metadata chunk (page 0) ----
+            if page["page_number"] == 0:
+                doc.metadata["chunk_id"] = chunk_id
+                chunks.append(doc)
+                chunk_id += 1
+                continue
 
-        # 3. Add chunk IDs
-        for i, chunk in enumerate(chunks):
-            chunk.metadata["chunk_id"] = i
+            # ---- Split normal pages ----
+            split_docs = self.text_splitter.split_documents([doc])
+
+            for sdoc in split_docs:
+                sdoc.metadata["chunk_id"] = chunk_id
+                chunks.append(sdoc)
+                chunk_id += 1
 
         return chunks

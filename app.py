@@ -1,96 +1,76 @@
-import os
-
-os.environ["HF_HUB_OFFLINE"] = "0"
-os.environ["TRANSFORMERS_OFFLINE"] = "0"
-
 import streamlit as st
-import tempfile
-import hashlib
+import os
 from core.raglock_system import RaglockSystem
 
-st.set_page_config(page_title="RAGlock Holmes", page_icon="🕵️‍♂️", layout="wide")
+# Force Streamlit to cache the system resource once the token is unlocked
+@st.cache_resource(show_spinner="Connecting to Gemma 2 Engine...")
+def load_rag_system(token_input):
+    return RaglockSystem(hf_token=token_input)
 
+# 1. Configured Sidebar Authentication Control
+st.sidebar.title("🔐 Access Control")
+st.sidebar.markdown("---")
 
-@st.cache_resource
-def load_rag_system():
-    return RaglockSystem()
+# User inputs token securely through a password text box field
+hf_token_input = st.sidebar.text_input("Enter Hugging Face Token:", type="password", help="Paste your hf_... token here")
 
+if not hf_token_input:
+    st.title("🕵️‍♂️ RAGlock Holmes Workspace")
+    st.info("🔑 Please enter your Hugging Face Token in the sidebar to authenticate and boot the RAG engine.")
+    st.stop()
 
-def file_hash(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()
+# 2. Lazy load the system once the token payload exists
+try:
+    st.session_state.rag_system = load_rag_system(hf_token_input)
+    st.sidebar.success("✅ Engine Connected to Cloud!")
+except Exception as e:
+    st.sidebar.error(f"❌ Connection Failed: {e}")
+    st.stop()
 
+# 3. Rest of Main User Interface Layout
+st.title("🕵️‍♂️ RAGlock Holmes")
+st.subheader("Advanced Academic Research Assistant")
 
-# --- Initialize session state safely ---
-if "rag_system" not in st.session_state:
-    st.session_state.rag_system = load_rag_system()
+# File Uploader Matrix
+uploaded_file = st.file_uploader("Upload an Academic Document (.pdf, .docx)", type=["pdf", "docx"])
 
-if "doc_processed" not in st.session_state:
-    st.session_state.doc_processed = False
+if uploaded_file:
+    # Set up localized workspace directories
+    os.makedirs("/content/temp_files", exist_ok=True)
+    temp_path = os.path.join("/content/temp_files", uploaded_file.name)
+    
+    # Save the file payload to disk layout safely
+    if not os.path.exists(temp_path):
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        with st.spinner("Parsing and indexing text chunks into the Hybrid Matrix..."):
+            st.session_state.rag_system.ingest_document(temp_path, original_filename=uploaded_file.name)
+        st.success(f"Successfully processed document: {uploaded_file.name}")
 
+st.markdown("---")
+
+# Q&A Segment Interface Loops
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-st.title("🕵️‍♂️ RAGlock Holmes: Academic Research Assistant")
-
-with st.sidebar:
-    st.header("Document Management")
-    uploaded_file = st.file_uploader("Upload your scientific PDF/Word", type=["pdf", "docx"])
-
-    if uploaded_file is not None:
-        data = uploaded_file.getvalue()
-        h = file_hash(data)
-
-        # Avoid re-processing same file
-        if st.session_state.get("last_file_hash") != h:
-            with st.spinner("Processing document... (Extracting, chunking, Embedding)"):
-                file_extension = os.path.splitext(uploaded_file.name)[1].lower()
-                with tempfile.NamedTemporaryFile(delete=False,
-                                                 suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-                    tmp_file.write(data)
-                    tmp_path = tmp_file.name
-
-                st.session_state.rag_system.ingest_document(
-                    file_path=tmp_path,
-                    original_filename=uploaded_file.name)
-
-                st.session_state.doc_processed = True
-                st.session_state.last_file_hash = h
-                st.success("Document successfully processed and indexed!")
-
-                os.remove(tmp_path)
-        else:
-            st.info("This document is already indexed.")
-
-# --- Render chat history ---
+# Display history profile elements
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- Chat input ---
-if prompt := st.chat_input("Ask a question about the uploaded document..."):
-
+# User Query input mechanics
+if prompt := st.chat_input("Ask a research question about your documents..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("assistant"):
-        if not st.session_state.doc_processed:
-            response_text = "Please upload a document first before asking questions! 📁"
-            st.warning(response_text)
-        else:
-            with st.spinner("Searching for answers..."):
-                # answer_text already contains formatted sources from raglock_system.py
-                answer_text, source_docs, verification = st.session_state.rag_system.ask_question(prompt)
-
-                verification = st.session_state.rag_system.verifier.get_verification_summary(answer_text, source_docs)
-
-                if not verification["is_valid"]:
-                    st.warning(f"⚠️ {verification['reason']}")
-                else:
-                    st.success("✅ Response verified")
-
-                # Just use the answer_text as-is (it already has sources formatted)
-                response_text = answer_text
-                st.markdown(response_text)
-
-    st.session_state.messages.append({"role": "assistant", "content": response_text})
+        with st.spinner("Searching document context and verifying references..."):
+            final_answer, retrieved_docs, verification = st.session_state.rag_system.ask_question(prompt)
+            st.markdown(final_answer)
+            
+            # Show a clear UI warning if numerical discrepancies are spotted
+            if not verification["is_valid"]:
+                st.warning(f"⚠️ Metadata Guardrail Warning: {verification['reason']}")
+                
+    st.session_state.messages.append({"role": "assistant", "content": final_answer})

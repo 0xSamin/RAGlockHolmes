@@ -4,11 +4,8 @@ from loaders.pdf_loader import PdfLoader, DocxLoader
 from chunking.text_chunker import TextChunker
 from vectorstore.vectordb_manager import VectorDBManager
 from utils.verifier import ResponseVerifier
-
-# CHANGED: Swapped to LangChain's Hugging Face Integration
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from google.colab import userdata
-
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 from utils.prompts import SYSTEM_PROMPT, QUERY_PROMPT_TEMPLATE
@@ -20,7 +17,6 @@ class RaglockSystem:
         self,
         model_name: str = "BAAI/bge-base-en-v1.5",
         device: str = "cpu",
-        # CHANGED: Using the official repository ID for Gemma 2 9B Instruct
         llm_model: str = "google/gemma-2-9b-it"
     ):
         print("Initializing RAGlock Holmes...")
@@ -28,11 +24,16 @@ class RaglockSystem:
         self.vector_db = VectorDBManager(model_name=model_name, device=device)
         self.verifier = ResponseVerifier()
         
-        # CHANGED: Securely fetch the Hugging Face token from Colab Secrets
-        try:
-            hf_token = userdata.get('HF_TOKEN')
-        except Exception:
-            raise ValueError("❌ Please set your 'HF_TOKEN' in the Colab Secrets (key icon) sidebar.")
+        # FIX: Check OS environment variables first (for Streamlit), then fall back to Colab Secrets
+        hf_token = os.environ.get('HF_TOKEN')
+        if not hf_token:
+            try:
+                hf_token = userdata.get('HF_TOKEN')
+            except Exception:
+                hf_token = None
+                
+        if not hf_token:
+            raise ValueError("❌ Please set your 'HF_TOKEN' in the Colab Secrets (key icon) sidebar or environment variables.")
             
         # 1. Setup the serverless endpoint
         llm_endpoint = HuggingFaceEndpoint(

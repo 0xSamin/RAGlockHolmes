@@ -4,7 +4,11 @@ from loaders.pdf_loader import PdfLoader, DocxLoader
 from chunking.text_chunker import TextChunker
 from vectorstore.vectordb_manager import VectorDBManager
 from utils.verifier import ResponseVerifier
-from langchain_community.chat_models import ChatOllama
+
+# CHANGED: Swapped to LangChain's Hugging Face Integration
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+from google.colab import userdata
+
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 from utils.prompts import SYSTEM_PROMPT, QUERY_PROMPT_TEMPLATE
@@ -16,13 +20,32 @@ class RaglockSystem:
         self,
         model_name: str = "BAAI/bge-base-en-v1.5",
         device: str = "cpu",
-        llm_model: str = "hf.co/unsloth/Llama-3.2-3B-Instruct-GGUF:UD-Q4_K_XL"
+        # CHANGED: Using the official repository ID for Gemma 2 9B Instruct
+        llm_model: str = "google/gemma-2-9b-it"
     ):
         print("Initializing RAGlock Holmes...")
         self.chunker = TextChunker()
         self.vector_db = VectorDBManager(model_name=model_name, device=device)
         self.verifier = ResponseVerifier()
-        self.llm = ChatOllama(model=llm_model, temperature=0.1)
+        
+        # CHANGED: Securely fetch the Hugging Face token from Colab Secrets
+        try:
+            hf_token = userdata.get('HF_TOKEN')
+        except Exception:
+            raise ValueError("❌ Please set your 'HF_TOKEN' in the Colab Secrets (key icon) sidebar.")
+            
+        # 1. Setup the serverless endpoint
+        llm_endpoint = HuggingFaceEndpoint(
+            repo_id=llm_model,
+            task="text-generation",
+            max_new_tokens=1024,
+            temperature=0.1,
+            huggingfacehub_api_token=hf_token,
+        )
+        
+        # 2. Wrap it in a Chat-compatible interface for LangChain chat messages
+        self.llm = ChatHuggingFace(llm=llm_endpoint)
+        
         self.qa_prompt = PromptTemplate.from_template(QUERY_PROMPT_TEMPLATE)
         print("Initialization complete.")
 
@@ -98,10 +121,13 @@ class RaglockSystem:
     def _generate_answer(self, question: str, context: str) -> str:
         """Send prompt to LLM and return the cleaned answer."""
         prompt = self.qa_prompt.format(context=context, question=question)
+        
+        # Standardized chat format for Gemma 2
         response = self.llm.invoke([
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}
         ])
+        
         # Strip any self-generated "Sources:" section the model may append
         answer = re.split(r'\n\s*Sources?:', response.content, flags=re.IGNORECASE)[0]
         return answer.strip()

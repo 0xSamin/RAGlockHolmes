@@ -1,73 +1,154 @@
-from loaders.pdf_loader import PdfLoader
+import os
+import re
+from loaders.pdf_loader import PdfLoader, DocxLoader
 from chunking.text_chunker import TextChunker
 from vectorstore.vectordb_manager import VectorDBManager
 from utils.verifier import ResponseVerifier
 from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import PromptTemplate
+from langchain_core.documents import Document
+from utils.prompts import SYSTEM_PROMPT, QUERY_PROMPT_TEMPLATE
+from typing import List, Tuple
 
 
 class RaglockSystem:
-    def __init__(self, model_name="BAAI/bge-base-en-v1.5", device="cpu", llm_model="hf.co/unsloth/Llama-3.2-3B-Instruct-GGUF:UD-Q4_K_XL"):
-        print("--- DEBUG: 1. Starting RaglockSystem init... ---")
-        print("--- DEBUG: 2. Initializing TextChunker... ---")
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-base-en-v1.5",
+        device: str = "cpu",
+        llm_model: str = "hf.co/unsloth/Llama-3.2-3B-Instruct-GGUF:UD-Q4_K_XL"
+    ):
+        print("Initializing RAGlock Holmes...")
         self.chunker = TextChunker()
-
-        print(
-            f"--- DEBUG: 3. Initializing VectorDBManager with model {model_name} (Might take a while to download)... ---")
         self.vector_db = VectorDBManager(model_name=model_name, device=device)
-
-        print("--- DEBUG: 4. Initializing ResponseVerifier... ---")
         self.verifier = ResponseVerifier()
-
-        print("--- DEBUG: 5. Initializing ChatOllama... ---")
         self.llm = ChatOllama(model=llm_model, temperature=0.1)
-        self.retriever = None
+        self.qa_prompt = PromptTemplate.from_template(QUERY_PROMPT_TEMPLATE)
+        print("Initialization complete.")
 
-        print("--- DEBUG: 6. Setting up PromptTemplate... ---")
-        self.qa_prompt = PromptTemplate.from_template("""
-        You are an academic assistant. Answer the question based ONLY on the provided context.
-        If you don't know the answer, say "I don't know".
-        For every claim, cite the source using [Page X].
+    # ------------------------------------------------------------------
+    # Ingestion
+    # ------------------------------------------------------------------
 
-        Context:
-        {context}
+    def ingest_document(self, file_path: str, original_filename: str = None):
+        """Detect file type, load, chunk, and index the document."""
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
 
-        Question: {question}
+        if ext == ".pdf":
+            loader = PdfLoader(file_path)
+        elif ext == ".docx":
+            loader = DocxLoader(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {ext}. Only .pdf and .docx are supported.")
 
-        Answer:
-        """)
-
-        print("--- DEBUG: 7. ALL INITIALIZATIONS COMPLETE! ---")
-
-    def ingest_document(self, pdf_path):
-        # Instantiate loader with path, then read
-        loader = PdfLoader(pdf_path)
         raw_docs = loader.read()
+        source_name = original_filename or os.path.basename(file_path)
+        chunks = self.chunker.chunk_documents(raw_docs, source_file=source_name)
+        self.vector_db.build_database(chunks)
 
-        # Call the specific method
-        chunked_docs = self.chunker.chunk_documents(raw_docs)
+        print(f"✅ Ingested {len(chunks)} chunks from '{source_name}'")
 
-        self.vector_db.build_database(chunked_docs)
-        print(f"Success: {pdf_path} ingested and stored in database.")
+    # ------------------------------------------------------------------
+    # Q&A
+    # ------------------------------------------------------------------
 
-    def ask_question(self, query):
-        print(f"Searching for: {query}...")
+    def ask_question(self, question: str) -> Tuple[str, List[Document], dict]:
+        """
+        Answer a question using the RAG pipeline.
 
-        retriever = self.vector_db.get_retriever(search_kwargs={"k": 4}, weights=[0.4, 0.6])
+        Returns:
+            final_answer: formatted answer string with sources appended
+            docs: retrieved source documents
+            verification: verification summary dict from ResponseVerifier
+        """
+        docs = self._retrieve(question)
+        context = self._build_context(docs)
+        answer = self._generate_answer(question, context)
+        verification = self._verify(answer, docs)
+        sources = self._build_sources(docs)
 
-        docs = retriever.invoke(query)
+        final_answer = f"{answer}\n\n{sources}"
+        return final_answer, docs, verification
 
-        if not docs:
-            return "No relevant information found in the documents.", []
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
-        context_parts = []
+    def _retrieve(self, question: str) -> List[Document]:
+        """Retrieve relevant chunks using hybrid BM25 + vector search."""
+        k = 10 if self._is_acronym_query(question) else 6
+        retriever = self.vector_db.get_retriever(
+            search_kwargs={"k": k},
+            weights=[0.3, 0.7]
+        )
+        return retriever.invoke(question)
+
+    def _build_context(self, docs: List[Document]) -> str:
+        """Format retrieved documents into a context string for the LLM."""
+        parts = []
         for doc in docs:
-            page_num = doc.metadata.get('page', 'Unknown')
-            context_parts.append(f"[Page {page_num}]: {doc.page_content}")
+            page = doc.metadata.get("page", "?")
+            if doc.metadata.get("is_synthetic", False):
+                parts.append(f"[DOCUMENT METADATA]\n{doc.page_content}")
+            else:
+                parts.append(f"[Page {page}]\n{doc.page_content}")
+        return "\n\n".join(parts)
 
-        context_str = "\n\n".join(context_parts)
+    def _generate_answer(self, question: str, context: str) -> str:
+        """Send prompt to LLM and return the cleaned answer."""
+        prompt = self.qa_prompt.format(context=context, question=question)
+        response = self.llm.invoke([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ])
+        # Strip any self-generated "Sources:" section the model may append
+        answer = re.split(r'\n\s*Sources?:', response.content, flags=re.IGNORECASE)[0]
+        return answer.strip()
 
-        chain = self.qa_prompt | self.llm
-        response = chain.invoke({"context": context_str, "question": query})
+    def _verify(self, answer: str, docs: List[Document]) -> dict:
+        """Run hallucination and citation checks. Logs warnings to console."""
+        verification = self.verifier.get_verification_summary(answer, docs)
+        if not verification["is_valid"]:
+            print(f"⚠️  Verification warning: {verification['reason']}")
+        return verification
 
-        return response.content, docs
+    def _format_citation(self, doc: Document) -> str:
+        """Format a single document chunk as a citation string."""
+        source = doc.metadata.get("source", "Unknown")
+        if doc.metadata.get("is_synthetic", False):
+            return f"[{source} - Document Info]"
+        page = doc.metadata.get("page", "?")
+        return f"[{source}, Page {page}]"
+
+    def _build_sources(self, docs: List[Document]) -> str:
+        """Build a formatted sources string from retrieved documents."""
+        unique_files = set(doc.metadata.get("source", "Unknown") for doc in docs)
+
+        if len(unique_files) == 1:
+            filename = list(unique_files)[0]
+            pages = sorted(
+                set(
+                    doc.metadata.get("page", "?")
+                    for doc in docs
+                    if not doc.metadata.get("is_synthetic", False)
+                ),
+                key=lambda x: int(x) if str(x).isdigit() else float("inf")
+            )
+            return f"Sources ({filename}): " + ", ".join(f"Page {p}" for p in pages)
+        else:
+            citations = sorted(set(self._format_citation(doc) for doc in docs))
+            return "Sources:\n" + "\n".join(citations)
+
+    def _is_acronym_query(self, question: str) -> bool:
+        """Detect acronym-related queries."""
+        patterns = [
+            r"what does \w+ stand for",
+            r"what is [\w-]+\??$",
+            r"expand [\w-]+",
+            r"full form of [\w-]+",
+            r"define [\w-]+",
+        ]
+        has_acronym = bool(re.search(r"\b[A-Z]{2,}(?:-[A-Za-z0-9]+)*\b", question))
+        has_pattern = any(re.search(p, question.lower()) for p in patterns)
+        return has_acronym or has_pattern

@@ -18,9 +18,10 @@ class RaglockSystem:
         self,
         model_name: str = "BAAI/bge-base-en-v1.5",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        llm_model: str = "unsloth/gemma-2-9b-it-4bit", # Uses official 4-bit optimized memory layout
-        hf_token: str = None  # No longer strictly needed for inference, kept to avoid app.py errors
-    ):
+        # FIX: Updated to the correct active Hugging Face repository string
+        llm_model: str = "unsloth/gemma-2-9b-it-bnb-4bit", 
+        hf_token: str = None
+        ):
         print(f"Initializing RAGlock Holmes Local Engine on GPU ({device})...")
         self.chunker = TextChunker()
         self.vector_db = VectorDBManager(model_name=model_name, device=device)

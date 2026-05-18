@@ -6,7 +6,7 @@ from loaders.pdf_loader import PdfLoader, DocxLoader
 from chunking.text_chunker import TextChunker
 from vectorstore.vectordb_manager import VectorDBManager
 from utils.verifier import ResponseVerifier
-from unsloth import FastLanguageModel  # Directly loading the local GPU acceleration kernels
+from unsloth import FastLanguageModel  # Directly loading local GPU acceleration kernels
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 from utils.prompts import SYSTEM_PROMPT, QUERY_PROMPT_TEMPLATE
@@ -18,10 +18,9 @@ class RaglockSystem:
         self,
         model_name: str = "BAAI/bge-base-en-v1.5",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        # FIX: Updated to the correct active Hugging Face repository string
         llm_model: str = "unsloth/gemma-2-9b-it-bnb-4bit", 
         hf_token: str = None
-        ):
+    ):
         print(f"Initializing RAGlock Holmes Local Engine on GPU ({device})...")
         self.chunker = TextChunker()
         self.vector_db = VectorDBManager(model_name=model_name, device=device)
@@ -31,10 +30,10 @@ class RaglockSystem:
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(
             model_name=llm_model,
             max_seq_length=2048,
-            load_in_4bit=True, # Drastically lowers VRAM footprint to comfortably fit on Tesla T4
+            load_in_4bit=True,  # Lowers VRAM footprint to comfortably fit on Tesla T4
             device_map="auto"
         )
-        # FastLanguageModel.for_inference(self.model) # Optimize the model layers specifically for generation tasks
+        FastLanguageModel.for_inference(self.model)  # Optimize model layers for generation tasks
         
         self.qa_prompt = PromptTemplate.from_template(QUERY_PROMPT_TEMPLATE)
         print("Local GPU Engine Initialization complete.")
@@ -107,7 +106,6 @@ class RaglockSystem:
         """Generate answer locally using the fast Unsloth tokenization stream."""
         prompt = self.qa_prompt.format(context=context, question=question)
         
-        # Format explicitly into Gemma 2 Chat Templates structures
         messages = [
             {"role": "user", "content": f"{SYSTEM_PROMPT}\n\n{prompt}"}
         ]
@@ -117,9 +115,8 @@ class RaglockSystem:
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt"
-        ).to("cuda")
+        ).to(self.model.device)  # Dynamically matched to engine hardware device
 
-        # Track exactly how many tokens were in our input prompt
         input_length = inputs.shape[1]
 
         with torch.no_grad():
@@ -127,14 +124,29 @@ class RaglockSystem:
                 input_ids=inputs,
                 max_new_tokens=1024,
                 temperature=0.1,
-                use_cache=True
+                use_cache=True,
+                pad_token_id=self.tokenizer.eos_token_id  # Stabilizes output boundary bounds
             )
+
+        # SAFE SHAPE HANDLING
+        if isinstance(outputs, torch.Tensor):
+            if outputs.dim() == 2:
+                generated_tokens = outputs[:, input_length:][0]
+            elif outputs.dim() == 1:
+                generated_tokens = outputs[input_length:]
+            else:
+                raise ValueError(f"Unexpected tensor shape: {outputs.shape}")
+        else:
+            raise ValueError(f"Unexpected output type: {type(outputs)}")
+
+        # ALWAYS move to CPU host space before string operations
+        generated_tokens = generated_tokens.detach().cpu()
+
+        response_text = self.tokenizer.decode(
+            generated_tokens,
+            skip_special_tokens=True
+        )
         
-        # FIX: Cleanly extract only the newly generated tokens using safe 2D slicing
-        generated_tokens = outputs[0][input_length:]
-        response_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        
-        # Strip any self-generated "Sources:" sections
         answer = re.split(r'\n\s*Sources?:', response_text, flags=re.IGNORECASE)[0]
         return answer.strip()
 

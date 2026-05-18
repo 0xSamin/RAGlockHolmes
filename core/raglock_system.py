@@ -119,6 +119,9 @@ class RaglockSystem:
             return_tensors="pt"
         ).to("cuda")
 
+        # Track exactly how many tokens were in our input prompt
+        input_length = inputs.shape[1]
+
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=inputs,
@@ -127,8 +130,8 @@ class RaglockSystem:
                 use_cache=True
             )
         
-        # Decode the raw generated tokens while skipping system prompt components
-        generated_tokens = outputs[0][len(inputs[0]):]
+        # FIX: Cleanly extract only the newly generated tokens using safe 2D slicing
+        generated_tokens = outputs[0][input_length:]
         response_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         
         # Strip any self-generated "Sources:" sections

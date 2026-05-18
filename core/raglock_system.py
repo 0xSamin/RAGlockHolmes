@@ -102,12 +102,27 @@ class RaglockSystem:
                 parts.append(f"[Page {page}]\n{doc.page_content}")
         return "\n\n".join(parts)
 
-
     def _generate_answer(self, question: str, context: str) -> str:
-        full_prompt = f"{SYSTEM_PROMPT}\n\n{QUERY_PROMPT_TEMPLATE.format(context=context, question=question)}"
+        """Generate answer using Gemma 2 with user-optimized chat structures."""
         
+        # Proper chat template structure optimized for 4-bit Gemma 2 stability
+        conversation = [
+            {
+                "role": "user", 
+                "content": f"You are a precise research assistant. Answer based ONLY on the provided context.\n\nContext:\n{context}\n\nQuestion: {question}\n\nProvide a clear, direct answer in 2-3 sentences. Do not include page numbers in your answer."
+            }
+        ]
+        
+        # Apply structural chat template to string formats first
+        formatted_prompt = self.tokenizer.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        # Safely tokenize input sequences with explicit max token guards
         inputs = self.tokenizer(
-            full_prompt,
+            formatted_prompt,
             return_tensors="pt",
             truncation=True,
             max_length=2048
@@ -115,25 +130,35 @@ class RaglockSystem:
         
         input_length = inputs.input_ids.shape[1]
         
+        self.model.eval()
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=256,
                 temperature=0.7,
                 top_p=0.9,
-                repetition_penalty=1.2,
+                top_k=50,
+                repetition_penalty=1.1,
                 do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.eos_token_id,  # Hardcoded to EOS to secure Unsloth kernel dim matrixes
+                eos_token_id=self.tokenizer.eos_token_id
             )
         
+        # Defend pipeline against unexpected 1D generation expansions
         if outputs.dim() == 1:
             outputs = outputs.unsqueeze(0)
         
         generated_tokens = outputs[0, input_length:]
+        
+        # Secure memory migration onto host space
+        generated_tokens = generated_tokens.detach().cpu()
         answer = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
         
-        return answer
-
+        # Cleanup output formatting leaks
+        answer = answer.split('\n\n')[0]  # Take the first coherent block only
+        answer = re.sub(r'\[Page \d+\]', '', answer)  # Strip inline page noise
+        
+        return answer.strip()
 
     def _verify(self, answer: str, docs: List[Document]) -> dict:
         """Run hallucination and citation checks. Logs warnings to console."""

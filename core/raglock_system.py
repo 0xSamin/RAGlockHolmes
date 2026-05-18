@@ -102,60 +102,38 @@ class RaglockSystem:
                 parts.append(f"[Page {page}]\n{doc.page_content}")
         return "\n\n".join(parts)
 
+
     def _generate_answer(self, question: str, context: str) -> str:
-        """Generate answer locally using the fast Unsloth tokenization stream."""
-        prompt = self.qa_prompt.format(context=context, question=question)
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{QUERY_PROMPT_TEMPLATE.format(context=context, question=question)}"
         
-        # Explicit clean system framing for Gemma 2
-        messages = [
-            {"role": "user", "content": f"{SYSTEM_PROMPT}\n\nContext:\n{context}\n\nTask:\n{question}"}
-        ]
-        
-        inputs = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt"
+        inputs = self.tokenizer(
+            full_prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048
         ).to(self.model.device)
-
-        input_length = inputs.shape[1]
         
-        self.model.eval()
-        input_ids = inputs
-        attention_mask = torch.ones_like(input_ids).to(self.model.device)
-
+        input_length = inputs.input_ids.shape[1]
+        
         with torch.no_grad():
             outputs = self.model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=1024,
-                temperature=0.3,            # Increased slightly from 0.1 to prevent instant <eos> collapse
-                repetition_penalty=1.15,     # Prevents getting stuck in repetitive loops or empty lines
-                use_cache=True,
+                **inputs,
+                max_new_tokens=512,
+                temperature=0.7,
+                top_p=0.9,
+                repetition_penalty=1.2,
+                do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id
             )
-
-        # SAFE SHAPE HANDLING
-        if isinstance(outputs, torch.Tensor):
-            if outputs.dim() == 2:
-                generated_tokens = outputs[:, input_length:][0]
-            elif outputs.dim() == 1:
-                generated_tokens = outputs[input_length:]
-            else:
-                raise ValueError(f"Unexpected tensor shape: {outputs.shape}")
-        else:
-            raise ValueError(f"Unexpected output type: {type(outputs)}")
-
-        generated_tokens = generated_tokens.detach().cpu()
-
-        response_text = self.tokenizer.decode(
-            generated_tokens,
-            skip_special_tokens=True
-        )
         
-        # Clean out remaining prompt fragments if any leaked through
-        answer = re.split(r'\n\s*Sources?:', response_text, flags=re.IGNORECASE)[0]
-        return answer.strip()
+        if outputs.dim() == 1:
+            outputs = outputs.unsqueeze(0)
+        
+        generated_tokens = outputs[0, input_length:]
+        answer = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+        
+        return answer
+
 
     def _verify(self, answer: str, docs: List[Document]) -> dict:
         """Run hallucination and citation checks. Logs warnings to console."""

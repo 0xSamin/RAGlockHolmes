@@ -106,8 +106,9 @@ class RaglockSystem:
         """Generate answer locally using the fast Unsloth tokenization stream."""
         prompt = self.qa_prompt.format(context=context, question=question)
         
+        # Explicit clean system framing for Gemma 2
         messages = [
-            {"role": "user", "content": f"{SYSTEM_PROMPT}\n\n{prompt}"}
+            {"role": "user", "content": f"{SYSTEM_PROMPT}\n\nContext:\n{context}\n\nTask:\n{question}"}
         ]
         
         inputs = self.tokenizer.apply_chat_template(
@@ -115,17 +116,23 @@ class RaglockSystem:
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt"
-        ).to(self.model.device)  # Dynamically matched to engine hardware device
+        ).to(self.model.device)
 
         input_length = inputs.shape[1]
+        
+        self.model.eval()
+        input_ids = inputs
+        attention_mask = torch.ones_like(input_ids).to(self.model.device)
 
         with torch.no_grad():
             outputs = self.model.generate(
-                input_ids=inputs,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=1024,
-                temperature=0.1,
+                temperature=0.3,            # Increased slightly from 0.1 to prevent instant <eos> collapse
+                repetition_penalty=1.15,     # Prevents getting stuck in repetitive loops or empty lines
                 use_cache=True,
-                pad_token_id=self.tokenizer.eos_token_id  # Stabilizes output boundary bounds
+                pad_token_id=self.tokenizer.eos_token_id
             )
 
         # SAFE SHAPE HANDLING
@@ -139,7 +146,6 @@ class RaglockSystem:
         else:
             raise ValueError(f"Unexpected output type: {type(outputs)}")
 
-        # ALWAYS move to CPU host space before string operations
         generated_tokens = generated_tokens.detach().cpu()
 
         response_text = self.tokenizer.decode(
@@ -147,6 +153,7 @@ class RaglockSystem:
             skip_special_tokens=True
         )
         
+        # Clean out remaining prompt fragments if any leaked through
         answer = re.split(r'\n\s*Sources?:', response_text, flags=re.IGNORECASE)[0]
         return answer.strip()
 
